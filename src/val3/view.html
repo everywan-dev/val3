@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>VAL3 vault view</title>
+<link rel="stylesheet" href="view.css">
+<script src="view.js" defer></script>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1 id="project">VAL3</h1>
+    <span class="sub" id="when">vault view · read-only · VAL3 writes no export</span>
+    <button class="plain" id="reload" type="button">Reload</button>
+    <div class="vaults" id="vaults"></div>
+  </header>
+  <div class="note" id="predicates">Live: neither superseded nor withdrawn. An entry can be both superseded and withdrawn.
+    No evidence: it has no evidence row. Approved by a person: a person approved its review item. Unverified: live,
+    no evidence and not approved by a person. Index counts do not add up to the total: an entry can be in several
+    indexes or in none.</div>
+  <nav role="tablist" id="tabs"></nav>
+  <div class="cols">
+    <main id="main"><p class="muted">Loading…</p></main>
+    <aside class="card panel" id="panel" aria-live="polite"><p class="muted">Select an entry to see it here.</p></aside>
+  </div>
+</div>
+</body>
+</html>

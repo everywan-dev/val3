@@ -1,0 +1,207 @@
+# VAL3 — what to deliver and how to find it
+
+Date: 2026-10-09. Status: **v2, decided 2026-10-10; implemented by plan 4
+(`docs/plans/2026-10-10-val3-plan-4-delivery-search.md`).** Replaces
+draft v1 of the same day (semantic search with reciprocal rank fusion); v1 stays in git history.
+Extends section 8 (delivery) of `2026-10-08-val3-design.md`.
+
+## 1. Problem
+
+The prompt hook matches entries by full-text search and injects up to eight. On the first adopted
+project (an invoice-processing project, 18 live entries on one topic) it injects many weak matches
+and misses relevant ones:
+
+- every entry shares the project's vocabulary, so a prompt shares a few words with most entries;
+- a word with two senses matches the wrong entry ("match an invoice with its PDF" finds the entry on
+  matching invoices with purchase orders);
+- paraphrases and short prompts ("go on", "yes") find nothing.
+
+The session-start index lists only recipes, tools and preferences. A vault made of facts and
+decisions, the common case so far, starts every session with "No recipes, tools or preferences
+yet", so the agent has no map of what the vault holds.
+
+## 2. Goal and success criteria
+
+- Of the entries injected per prompt, most are useful for that prompt.
+- A prompt that nothing in the vault bears on receives nothing.
+- The agent can always see what the vault holds and ask for more.
+- Nothing leaves the machine; no new Python dependency; the hook fails open.
+- Latency: the prompt hook stays under about 0.5 s for typed prompts.
+
+Measured on a labelled set (section 4.5) against the current behaviour: share of injected entries
+that are needed, prompts served (at least one needed entry injected), prompts with no needed entry
+left silent. An entry is needed when, without it, the agent would act against a project decision,
+ask again for something already settled, or redo work; an entry on the same topic that changes
+nothing counts as noise.
+
+## 3. Evidence
+
+### 3.1 How other memory systems choose (survey, 2026-10-09)
+
+- No system decides at retrieval time whether an entry is useful. Mem0, Zep, Letta, Cognee,
+  MemPalace and others return a top k, mostly without a threshold, and leave the judgement to the
+  reading model. None publishes how often it correctly injects nothing.
+- Coding assistants (Claude Code memory, Cursor and Windsurf rules, claude-mem) load an index or
+  descriptions at session start and let the agent pull detail. claude-mem moved from per-prompt
+  injection to session-start only. MemPalace's Claude Code integration injects nothing per prompt;
+  its agent pulls through MCP tools. Its code notes the same symptom seen here: distances "cluster
+  in 1.2-1.5 range regardless of match quality".
+- Reciprocal rank fusion penalises an entry that only one retriever finds (Bruch et al. 2023,
+  arXiv 2210.11934); it lost the most relevant entry in our v1 spike.
+- Related but non-answering context hurts more than random context (Cuconasu et al. 2024,
+  arXiv 2401.14887): inject few entries.
+- Public benchmark figures (LoCoMo, LongMemEval) are disputed between vendors and measure retrieval
+  recall or answer accuracy on chat histories; they do not transfer to this choice.
+
+### 3.2 Latency on the target machine (CPU, Ollama 0.34.2, `bge-m3`)
+
+| Work | Measured |
+|---|---|
+| Embed a prompt of 40-80 characters | 30-50 ms |
+| Embed 240 / 490 characters | 150 / 330 ms |
+| Embed a prompt of about 420 tokens | about 1.1 s |
+| Cross-encoder reranker over 30 candidates (`bge-reranker-v2-m3`, `Qwen3-Reranker-0.6B`) | 10-30 s, extrapolated from embedding throughput; Ollama has no rerank endpoint |
+| Small local model judging 20 candidates (0.6-1.7B) | 3-8 s, estimated |
+
+Rerankers and local judges do not fit a prompt hook on this hardware.
+
+### 3.3 Bench (2026-10-09, throwaway code)
+
+Labelled set: 38 prompts against the 18 live entries of the first adopted project. 21 are real
+typed prompts from two sessions of that project, 17 were written by the bench's author while
+looking at the titles; 28 have relevant entries, 10 have none. Labels are the author's proposal,
+not yet reviewed by the project owner. The set lives outside this repository (it holds project
+data).
+
+Policies inject at most 3 entries; a prompt of 6 words or fewer is embedded together with the
+last 500 characters of the previous assistant turn.
+
+| Policy | Injected | Relevant share | Served (of 28) | Silent on no-answer (of 10) |
+|---|---|---|---|---|
+| Current: full-text, up to 8 | 89 | 40 % | 19 | 7 |
+| Semantic, cosine ≥ 0.60 | 35 | 77 % | 19 | 10 |
+| Semantic, cosine ≥ 0.55 | 63 | 48 % | 22 | 7 |
+| Semantic minus each entry's mean similarity to other prompts, ≥ 0.15 | 36 | 72 % | 18 | 9 |
+| Same, ≥ 0.12 | 50 | 64 % | 23 | 8 |
+
+Other variants, none better than plain semantic with a floor: full-text alone; reciprocal rank
+fusion; convex combination of normalised scores (α 0.3-0.85); entries enriched with four
+questions per entry generated by the extractor model; hub correction using the other entries or
+the generated questions as the bank. Appending the previous assistant turn to short prompts
+served three more prompts with the same floor.
+
+Caveats: one vault, 38 prompts, floor tuned on the same data, labels by the author. The result
+supports the direction (semantic with a calibrated floor and a small cap), not the exact floor.
+
+Owner's review (2026-10-10): the set does not measure what matters. Most prompts are ordinary turns
+("go on", "yes", "do it", state reviews) and the labels mark entries related by topic. What VAL3
+must deliver are the data that carry weight in the project. The figures above stand as evidence for
+the direction only; the floor is recalibrated on a set built as described in 4.5.
+
+## 4. Proposed design
+
+### 4.1 Delivery in three layers
+
+1. **Session start: an index of every live entry.** All kinds (facts and decisions included), one
+   line each (`<vault>#<id> [kind] title`), grouped as today, within the 10 000-character hook
+   limit (about 90 entries). Beyond that, the existing rule applies: entries that do not fit are
+   counted and the agent is pointed to `val3 recall`. This gives the agent the map; the judgement
+   of what to read stays with the agent, as in the systems of section 3.1.
+2. **Every typed prompt: at most 3 entries above a floor**, full title and statement as today.
+   Nothing is injected when no entry reaches the floor.
+3. **Pull: `val3 recall` and `val3 show`**, same search as layer 2 without the cap, for the agent to
+   ask for more.
+
+Harness turns (task notifications, peer messages, wakeups) receive no per-prompt injection: their
+long model text is slow to embed and was the noisiest case with full-text search. The index already
+covers them. Checked on 2026-10-10 over the two captured sessions of the first adopted project:
+11 harness turns received 88 injected entries; none changed what the agent did, and the only one it
+cited repeated a warning it had already given on a typed turn.
+
+### 4.2 Search
+
+- Query text: the prompt; when it has 6 words or fewer, also the prompt plus the last 500 characters
+  of the previous assistant turn, read from the end of `transcript_path` in the hook input. Both are
+  embedded in one request and an entry scores against the closer one (2026-10-11: a short prompt
+  that changes topic was diluted by the previous turn; the noise the previous turn brings remains).
+- Score: cosine similarity between the query vector and each entry's vector in the query's
+  embedding space (4.3), over the home and linked vaults, superseded entries excluded, tools first
+  as today.
+- Floor: `floor` in the `[embedding]` table of `val3.toml`, default 0.60 for `bge-m3`. Each
+  project calibrates it with `val3 eval` (4.5).
+- No fusion with full-text. Full-text search remains the fallback (4.4) and the extractor's
+  duplicate check.
+
+### 4.3 Embedding service and storage
+
+- A local HTTP embedding service; development and default: Ollama with `bge-m3`, called with
+  `urllib` (`POST /api/embed`). `val3.toml` gains `[embedding]`: `url` (default
+  `http://127.0.0.1:11434`), `model` (default `bge-m3`), `floor`. No table means full-text only,
+  as today.
+- PostgreSQL with `pgvector`; the development container moves to `pgvector/pgvector:0.8.1-pg16` (same
+  volume); `CREATE EXTENSION vector` joins `unaccent` in `common.sql`.
+- Each vault gains an append-only table
+  `embedding (entry_id, model, digest, text_version, dims, vector, created_at)`, unique on
+  `(entry_id, model, digest, text_version)`, with the append-only trigger. Changing the model adds
+  rows. Vectors are compared only within one embedding space (model, digest, dimensions, text
+  version). An exact scan is enough at hundreds to low thousands of entries.
+- `val3 vault upgrade <vault>` adds the table to existing vaults; idempotent, run by a person.
+- The vector is computed when an entry is **admitted** (by extraction, `val3 save`, `val3 tool add`
+  or an approved review), from title and statement. A review item has no entry row and no vector
+  until approved. If the service does not answer, the entry is stored without a vector and
+  `val3 embed` fills the gaps; the drainer runs it after each extraction. After an admission one
+  batch is embedded, newest first; the drainer and `val3 embed` fill the rest. Superseded entries
+  get vectors too, so `val3 eval` can replay moments when they were live.
+
+### 4.4 Failure handling
+
+- The prompt hook gives the embedding call a 1 s timeout. On failure it falls back to the current
+  full-text search with a cap of 3, and warns once per session.
+- Entries without a vector in the current space are found by full-text search among themselves and
+  offered with the semantic hits, after them (plan 4, decision 6), so an entry admitted while the
+  service was down reaches the prompt hook too.
+
+### 4.5 Calibration and review
+
+- `val3 eval <file>` reads a labelled set (one JSON object per line: `query`, optional `previous`,
+  `relevant` refs, empty for no-answer prompts) and prints, for a range of floors, the columns of
+  the table in 3.3 and the latency. `relevant` is `null` while not labelled and `[]` for a decided
+  no-answer case; `val3 eval` refuses unlabelled cases, applies the hook's own selection, reads the
+  vault as of each case's `at`, and the floor is chosen on one set and confirmed on another from
+  other sessions.
+- A labelled set is anchored on entries that carry weight in the project: each case is a moment
+  (a real prompt, with its previous turn) where an entry is needed in the sense of section 2, and
+  `relevant` lists only needed entries. Ordinary turns enter the set as no-answer cases unless an
+  entry changes the next action. Written questions are not used.
+- Labelled sets live outside the repository of VAL3; each project keeps its own.
+- The prompt hook appends one line per typed prompt to a local log
+  (`~/.local/state/val3/prompts/<project>.jsonl`: time, session, prompt, refs and scores
+  injected; lines older than 30 days are dropped). `val3 eval --draft <log>` turns it into an
+  unlabelled set for a person to label, so the set grows from real use instead of written
+  questions.
+
+## 5. Rejected or deferred
+
+| Option | Decision | Reason |
+|---|---|---|
+| Reciprocal rank fusion | Rejected | Lost the key entry in the spike; no gain in the bench |
+| Convex combination with full-text | Deferred | No gain over semantic alone in the bench; revisit if identifiers (mail addresses, hosts, numbers) are missed |
+| Hub correction (minus mean similarity to other prompts) | Deferred | Better top-3 order without a floor; no gain once a floor is set; needs a prompt bank |
+| Questions generated per entry at write time | Deferred | No gain at 18 entries; LongMemEval reports gains on larger stores |
+| Cross-encoder reranker, local LLM judge | Rejected | 3-30 s per prompt on the target CPU |
+| Titles only per prompt | Rejected | With 77 % relevant and a cap of 3, the full entry costs little; titles are delivered by the index |
+| Injection on harness turns | Removed | Slow to embed, noisiest case; the index covers them |
+| External embedding services | Rejected | Data would leave the machine |
+| Vector column in `entry` | Rejected | Breaks append-only |
+
+## 6. Decisions on the open questions (2026-10-10)
+
+1. **Default floor**: semantic search is on with a floor of 0.60 for `bge-m3` from the start; a
+   project does not wait for its own calibration. A floor too high only costs silence, which the
+   index and `val3 recall` cover. `val3 eval` adjusts it per project once a set exists.
+2. **Embedding service in production**: one service next to PostgreSQL. Every workstation sharing a
+   vault uses it, so the model is the same by construction. Failure falls back to full-text (4.4).
+3. **Prompt log**: stays on the workstation, not in the vault (the vault is shared and prompts may
+   hold sensitive text), with a retention of 30 days. Moving it to the vault waits until calibration
+   across machines is needed.
+4. **Harness turns**: no per-prompt injection, confirmed by the review in 4.1.

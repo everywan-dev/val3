@@ -1,0 +1,9 @@
+.env
+auth.*
+__pycache__/
+*.egg-info/
+.venv/
+.pytest_cache/
+scripts_claude/
+.worktrees/
+.claude/worktrees/
